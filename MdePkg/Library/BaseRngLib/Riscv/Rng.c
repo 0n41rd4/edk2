@@ -18,74 +18,139 @@
 
 #define SEED_RETRY_LOOPS  100
 
-// 64-bit Mersenne Twister implementation
+// ChaCha20 implementation
 // A widely used pseudo random number generator. It performs bit shifts etc to
 // achieve the random number. It's output is determined by SEED value generated
 // by RISC-V SEED CSR"
 
-#define STATE_SIZE  312
-#define MIDDLE      156
-#define INIT_SHIFT  62
-#define TWIST_MASK  0xb5026f5aa96619e9ULL
-#define INIT_FACT   6364136223846793005ULL
-#define SHIFT1      29
-#define MASK1       0x5555555555555555ULL
-#define SHIFT2      17
-#define MASK2       0x71d67fffeda60000ULL
-#define SHIFT3      37
-#define MASK3       0xfff7eee000000000ULL
-#define SHIFT4      43
+/* (RFC7539 convention) */
+#define CHACHA_KEY_SIZE    32
+#define CHACHA_BLOCK_SIZE  64
+#define CHACHA_STATE_WORDS  (CHACHA_BLOCK_SIZE / sizeof (UINT32))
+#define CHACHA_KEY_WORDS  (CHACHA_KEY_SIZE / sizeof (UINT32))
 
-#define LOWER_MASK  0x7fffffff
-#define UPPER_MASK  (~(UINT64)LOWER_MASK)
+#define CHACHA_CONSTANT_EXPA 0x61707865U
+#define CHACHA_CONSTANT_ND_3 0x3320646eU
+#define CHACHA_CONSTANT_2_BY 0x79622d32U
+#define CHACHA_CONSTANT_TE_K 0x6b206574U
 
-static UINT64  mState[STATE_SIZE];
-static UINTN   mIndex = STATE_SIZE + 1;
+static UINT32  ChaChaState[CHACHA_STATE_WORDS];
+static UINTN   ChaChaIndex = CHACHA_STATE_WORDS + 1;
 
 /**
-   Initialize mState to defualt state.
+   Rotate 32-bit value left
 
-   @param[in] S Input seed value
+   @param[in]  Operand The 64-bit operand to rotate left.
+   @param[in]  Count   The number of bits to rotate left.
+
+   @return Operand << Count
+ **/
+STATIC
+UINT32
+ROL32 (
+  IN      UINT32  Operand,
+  IN      UINTN   Count
+  )
+{
+  return (Operand << Count) | (Operand >> (32 - Count));
+}
+
+/**
+   ChaCha algorithm
+
+   @param  X        Pointer to initial ChaCha state.
+   @param  Rounds   Number of ChaCha rounds.
  **/
 STATIC
 VOID
-SeedRng (
-  IN UINT64  S
+ChaCha (
+  IN OUT  UINT32  *X,
+  IN      UINTN   Rounds
   )
 {
-  UINTN  I;
+  UINTN   I;
 
-  mIndex    = STATE_SIZE;
-  mState[0] = S;
+  for (I = 0; I < Rounds; I+=2) {
+    X[0]  += X[4];    X[12] = ROL32(X[12] ^ X[0],  16);
+    X[1]  += X[5];    X[13] = ROL32(X[13] ^ X[1],  16);
+    X[2]  += X[6];    X[14] = ROL32(X[14] ^ X[2],  16);
+    X[3]  += X[7];    X[15] = ROL32(X[15] ^ X[3],  16);
 
-  for (I = 1; I < STATE_SIZE; I++) {
-    mState[I] = (INIT_FACT * (mState[I - 1] ^ (mState[I - 1] >> INIT_SHIFT))) + I;
+    X[8]  += X[12];   X[4]  = ROL32(X[4]  ^ X[8],  12);
+    X[9]  += X[13];   X[5]  = ROL32(X[5]  ^ X[9],  12);
+    X[10] += X[14];   X[6]  = ROL32(X[6]  ^ X[10], 12);
+    X[11] += X[15];   X[7]  = ROL32(X[7]  ^ X[11], 12);
+
+    X[0]  += X[4];    X[12] = ROL32(X[12] ^ X[0],   8);
+    X[1]  += X[5];    X[13] = ROL32(X[13] ^ X[1],   8);
+    X[2]  += X[6];    X[14] = ROL32(X[14] ^ X[2],   8);
+    X[3]  += X[7];    X[15] = ROL32(X[15] ^ X[3],   8);
+
+    X[8]  += X[12];   X[4]  = ROL32(X[4]  ^ X[8],   7);
+    X[9]  += X[13];   X[5]  = ROL32(X[5]  ^ X[9],   7);
+    X[10] += X[14];   X[6]  = ROL32(X[6]  ^ X[10],  7);
+    X[11] += X[15];   X[7]  = ROL32(X[7]  ^ X[11],  7);
+
+    X[0]  += X[5];    X[15] = ROL32(X[15] ^ X[0],  16);
+    X[1]  += X[6];    X[12] = ROL32(X[12] ^ X[1],  16);
+    X[2]  += X[7];    X[13] = ROL32(X[13] ^ X[2],  16);
+    X[3]  += X[4];    X[14] = ROL32(X[14] ^ X[3],  16);
+
+    X[10] += X[15];   X[5]  = ROL32(X[5]  ^ X[10], 12);
+    X[11] += X[12];   X[6]  = ROL32(X[6]  ^ X[11], 12);
+    X[8]  += X[13];   X[7]  = ROL32(X[7]  ^ X[8],  12);
+    X[9]  += X[14];   X[4]  = ROL32(X[4]  ^ X[9],  12);
+
+    X[0]  += X[5];    X[15] = ROL32(X[15] ^ X[0],   8);
+    X[1]  += X[6];    X[12] = ROL32(X[12] ^ X[1],   8);
+    X[2]  += X[7];    X[13] = ROL32(X[13] ^ X[2],   8);
+    X[3]  += X[4];    X[14] = ROL32(X[14] ^ X[3],   8);
+
+    X[10] += X[15];   X[5]  = ROL32(X[5]  ^ X[10],  7);
+    X[11] += X[12];   X[6]  = ROL32(X[6]  ^ X[11],  7);
+    X[8]  += X[13];   X[7]  = ROL32(X[7]  ^ X[8],   7);
+    X[9]  += X[14];   X[4]  = ROL32(X[4]  ^ X[9],   7);
   }
 }
 
 /**
-   Initializes mState with entropy values. The initialization is based on the
-   Seed value populated in mState[0] which then influences all the other values
-   in the mState array. Later values are retrieved from the same array instead
-   of calling trng instruction every time.
+   Initialize ChaChaState to an initial state.
 
+   @retval TRUE         ChaCha state generated successfully.
+   @retval FALSE        Failed to generate ChaCha state.
  **/
 STATIC
-VOID
-TwistRng (
+BOOLEAN
+MakeChaChaState (
   VOID
   )
 {
-  UINTN   I;
-  UINT64  X;
+  UINT32  Seed[CHACHA_KEY_WORDS];
+  UINTN   ValidSeeds;
 
-  for (I = 0; I < STATE_SIZE; I++) {
-    X         = (mState[I] & UPPER_MASK) | (mState[(I + 1) % STATE_SIZE] & LOWER_MASK);
-    X         = (X >> 1) ^ (X & 1 ? TWIST_MASK : 0);
-    mState[I] = mState[(I + MIDDLE) % STATE_SIZE] ^ X;
+  for (ValidSeeds = 0; ValidSeeds < CHACHA_KEY_WORDS; ValidSeeds++) {
+    if (!Get32BitSeed (&Seed[ValidSeeds])) {
+      return FALSE;
+    }
   }
 
-  mIndex = 0;
+  ChaChaState[0] = CHACHA_CONSTANT_EXPA;
+  ChaChaState[1] = CHACHA_CONSTANT_ND_3;
+  ChaChaState[2] = CHACHA_CONSTANT_2_BY;
+  ChaChaState[3] = CHACHA_CONSTANT_TE_K;
+
+  for (ValidSeeds = 4; ValidSeeds < CHACHA_KEY_WORDS + 4; ValidSeeds++) {
+    ChaChaState[4 + ValidSeeds] = Seed[ValidSeeds];
+  }
+
+  for (ValidSeeds = CHACHA_KEY_WORDS + 4; ValidSeeds < CHACHA_STATE_WORDS; ValidSeeds++) {
+    ChaChaState[4 + ValidSeeds] = 0;
+  }
+
+  ChaCha (&ChaChaState, 20);
+  ChaChaIndex = 0;
+
+  return TRUE;
 }
 
 // Defined in Seed.S
@@ -96,7 +161,7 @@ ReadSeed (
 
 /**
    Gets seed value by executing trng instruction (CSR 0x15) amd returns
-   the see to the caller 64bit value.
+   the see to the caller 32-bit value.
 
    @param[out] Out     Buffer pointer to store the 64-bit random value.
    @retval TRUE         Random number generated successfully.
@@ -104,8 +169,8 @@ ReadSeed (
  **/
 STATIC
 BOOLEAN
-Get64BitSeed (
-  OUT UINT64  *Out
+Get32BitSeed (
+  OUT UINT32  *Out
   )
 {
   UINT64  Seed;
@@ -116,7 +181,7 @@ Get64BitSeed (
 
   Retry       = SEED_RETRY_LOOPS;
   Entropy     = (UINT16 *)Out;
-  NeededSeeds = sizeof (UINT64) / sizeof (UINT16);
+  NeededSeeds = sizeof (UINT32) / sizeof (UINT16);
   ValidSeeds  = 0;
 
   if (!ArchIsRngSupported ()) {
@@ -163,10 +228,8 @@ BaseRngLibConstructor (
   VOID
   )
 {
-  UINT64  Seed;
 
-  if (Get64BitSeed (&Seed)) {
-    SeedRng (Seed);
+  if (MakeChaChaState ()) {
     return EFI_SUCCESS;
   } else {
     return EFI_UNSUPPORTED;
@@ -188,10 +251,10 @@ ArchGetRandomNumber16 (
   OUT UINT16  *Rand
   )
 {
-  UINT64  Rand64;
+  UINT32  Rand32;
 
-  if (ArchGetRandomNumber64 (&Rand64)) {
-    *Rand = Rand64 & MAX_UINT16;
+  if (ArchGetRandomNumber32 (&Rand32)) {
+    *Rand = Rand32 & MAX_UINT16;
     return TRUE;
   }
 
@@ -213,14 +276,26 @@ ArchGetRandomNumber32 (
   OUT UINT32  *Rand
   )
 {
-  UINT64  Rand64;
+  UINT32  Y;
 
-  if (ArchGetRandomNumber64 (&Rand64)) {
-    *Rand = Rand64 & MAX_UINT32;
-    return TRUE;
+  // Never initialized.
+  if (ChaChaIndex > STATE_SIZE) {
+    return FALSE;
   }
 
-  return FALSE;
+  // Re-run ChaCha
+  if (ChaChaIndex == STATE_SIZE) {
+    if (!MakeChaChaState ()) {
+      return FALSE;
+    }
+  }
+
+  Y  = ChaChaState[ChaChaIndex];
+
+  ChaChaIndex++;
+
+  *Rand = Y;
+  return TRUE;
 }
 
 /**
@@ -238,28 +313,13 @@ ArchGetRandomNumber64 (
   OUT UINT64  *Rand
   )
 {
-  UINT64  Y;
+  UINT32  Rand32L;
+  UINT32  Rand32H;
 
-  // Never initialized.
-  if (mIndex > STATE_SIZE) {
-    return FALSE;
+  if (ArchGetRandomNumber32 (&Rand32H) && ArchGetRandomNumber32 (&Rand32L)) {
+    *Rand = ((UINT64)Rand32H << 32) | Rand32L;
+    return TRUE;
   }
-
-  // Mersenne Twister
-  if (mIndex == STATE_SIZE) {
-    TwistRng ();
-  }
-
-  Y  = mState[mIndex];
-  Y ^= (Y >> SHIFT1) & MASK1;
-  Y ^= (Y << SHIFT2) & MASK2;
-  Y ^= (Y << SHIFT3) & MASK3;
-  Y ^= Y >> SHIFT4;
-
-  mIndex++;
-
-  *Rand = Y;
-  return TRUE;
 }
 
 /**
